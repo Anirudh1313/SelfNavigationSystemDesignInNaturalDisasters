@@ -22,7 +22,7 @@ TODO:
 
 class PathConfig(object):
     __slots__ = ('wallToWatch', 'desiredTrajectory', 'velocity', 'pubRate',
-                 'minFrontDist', 'enabled')
+                 'minFrontDist', 'enabled', 'rev', 'count')
     """
     wallToWatch: Set which wall to hug
     options: autobot.msg.wall_dist.WALL_LEFT
@@ -36,6 +36,8 @@ class PathConfig(object):
         self.velocity = 10070          # velocity of drive
         self.pubRate = 0              # publish rate of node
         self.enabled = True          # enable/disable state of wall hugging
+        self.rev = False
+        self.count = 0
 
 PATH_CONFIG = PathConfig()
 errorPub = rospy.Publisher('error', pid_input, queue_size=10)
@@ -122,39 +124,21 @@ def max_list(list):
 
 # Function will return the biggest free available segment
 def far_see(data):
-    rangeDist = 5       #checking distance range is 5
-    i = 0
-    #count = 0
-    dic = []
-    start_seg = 0
-    for count, x in enumerate(data):
-        if x > rangeDist:
-            if i is 0:
-                start_seg = count
-            i += 1
+    i_rl = 0
+    direc = 90
+    # checking for broad angle, from starting from center, if front is completely blocked then the segment starts turning sideways
+    while direc < 120 and direc > 60:
+        near_vision = [getRange(data, direc-3+i) for i in range(6)]
+        if any(value < 5 for value in near_vision):
+            i_rl += 1
+            if i_rl % 2:
+                direc = direc+i_rl
+            else:
+                direc = direc-i_rl
         else:
-            #dic.append([start_seg, count, i])
-            if i is not 0:
-                dic.append([start_seg, count, i])
-                i = 0
-     
-    #key_max = max(dic.keys(), key=(lamda k: dic[k]))
-    #key_max = max(dic.items(), key=operator.itemgetter(1))[0]
-    #key_min = min(dic.keys(), key=(lamda k: dic[k]))
-    key_max = max_list(dic)
+            return direc
 
-    if len(key_max) is 3:
-        computed_seg_first = key_max[0]
-        computed_seg_last = key_max[1] 
-        print("key_len = 3")
-        if key_max[2] > 6:         
-            mid_seg = (computed_seg_first+computed_seg_last)/2
-        else:
-            mid_seg = 0
-    else:
-        mid_seg = 0
-
-    return mid_seg
+    return -1 
 
 
 
@@ -163,8 +147,8 @@ def short_see(direc, data):
     i_rl = 0
 
     while direc < 120 and direc > 60:
-        near_vision = [getRange(data, direc-30+i) for i in range(60)]
-        if any(value < 0.5 for value in near_vision):
+        near_vision = [getRange(data, direc-15+i) for i in range(30)]
+        if any(value < 0.9 for value in near_vision):
             i_rl += 1
             if i_rl % 2:
                 direc = direc+i_rl
@@ -175,6 +159,84 @@ def short_see(direc, data):
 
     return -1     
 
+def check_2m_and_run(data):
+
+    global PATH_CONFIG
+    farFrontDist = [getRange(data, 80+i) for i in range(20)]			# creates the list of all the FAR-FRONT values in range 80-to-100
+    frontDistance = [getRange(data, 70+i) for i in range(40)]			# creates the list of all the FRONT 	 values in range 70-to-110
+
+    #theta = 50  # PICK THIS ANGLE TO BE BETWEEN 0 AND 70 DEGREES
+
+    #thetaDistRight = getRange(data, theta)  # a
+    rightDist = [getRange(data, 50+i) for i in range(30)]  # b
+
+    #thetaDistLeft = getRange(data, 180-theta)  # aL
+    leftDist = [getRange(data, 100+i) for i in range(30)]  # bL
+
+    left_b = False																		# INDICATES IF LEFT  is blocked
+    right_b = False																		# INDICATES IF RIGHT is blocked
+
+    minLeftDist = 1				# threshold for LEFt distance
+    minRightDist = 1				# threshold for RIGHT  distance
+    minFrontDist = 0.5			# threshold for FRONT distance
+    minFarFrontDist = 2			# threshold for FarFront distance
+
+    #driveParam = drive_param()
+
+ 
+    #looking for closer objest, go to blocked state
+
+    velocity = PATH_CONFIG.velocity
+    angle = 11
+
+
+    if any(front_fd < minFarFrontDist for front_fd in farFrontDist):		# CHECKs IF FAR-front is blocked
+        print "Far Front Blocked!"
+        
+#        driveParam.velocity = PATH_CONFIG.velocity
+#        smallest = 100;
+#        for d in rightDist:
+#            if smallest > d:
+#                smallest = d
+
+        fd = min(farFrontDist)		#returns the MINIMUM distance from the list containing all the FAR-FRONT DISTANCE values
+        if any(front_d < minFrontDist for front_d in frontDistance):		# CHECKs IF Front is blocked
+            print "Front Blocked!"
+            if not PATH_CONFIG.rev:
+                velocity = 6600
+                PATH_CONFIG.count += 1
+                if PATH_CONFIG.count > 10:
+                    PATH_CONFIG.rev = True
+                    PATH_CONFIG.count = 0
+            else:
+                velocity = 9830
+
+            angle = 0
+        elif all(left_d > min(rightDist) for left_d in leftDist):
+            angle = -90 + (fd-1)*60
+            print "Turning left"
+            PATH_CONFIG.rev = False
+            PATH_CONFIG.count = 0
+        elif all(right_d > min(leftDist) for right_d in rightDist):
+            angle = 90 - (fd-1)*60
+            print "Turning right"
+            PATH_CONFIG.rev = False
+            PATH_CONFIG.count = 0
+        else:
+            velocity = 10000 
+            angle = 0
+            PATH_CONFIG.rev = False
+            PATH_CONFIG.count = 0
+    else:
+        PATH_CONFIG.rev = False
+        PATH_CONFIG.count = 0
+    
+    vel_ang = []
+    vel_ang.append(velocity)
+    vel_ang.append(angle)
+
+    return vel_ang
+
 
 def callback(data):
     global PATH_CONFIG
@@ -184,34 +246,62 @@ def callback(data):
         return
 
     #frontDistance = getRange(data, 90)
-    car_vision = [getRange(data, 60+i) for i in range(60)]
 
-    direc = far_see(car_vision)
+    #checking for far front distance
+    farFrontDist = [getRange(data, 85+i) for i in range(10)]	
 
+    # if frontDist is less than 5m, then go in
     driveParam = drive_param()
+    direc = 90
+    fd = min(farFrontDist)
 
-    if direc is 0:
-        driveParam.velocity = 9830
+    #initially setting default velocity and angle, change in appropriate conditions
+    driveParam.velocity = PATH_CONFIG.velocity
+    driveParam.angle = 0
+
+    if fd < 10:
+
+        if fd < 2:
+            vel_ang = check_2m_and_run(data)
+
+            driveParam.velocity = vel_ang[0]
+            driveParam.angle = vel_ang[1] 
+        else:
+             #check for available largest segment and get the direction
+            direc = far_see(data)
+
+        
+            if direc is -1:  #checking for return value from far_see
+                #driveParam.velocity = 9830
+                vel_ang = check_2m_and_run(data)
+
+                driveParam.velocity = vel_ang[0]
+                driveParam.angle = vel_ang[1]          
+            else:
+                #turn the car to the free space direction, then automatically farFrontDist goes higher than 5, will go out of this main if loop
+    
+                # LiDAR direc is from 0 to 180 in front semicircle, for angle pwm its from 90 to -90
+                if direc < 90:   #if far_see output direction is towards right side
+                    # turning car slowly from, 30' to 90' by checking the min front dist from 5m to 2m. so Instantly it turns to 30 and then turns to slowly to 90
+                    # direc is in LiDAR angle bangwidth, converting it to pwm angle bandwidth as well
+                    driveParam.angle = (90 - direc) - (fd-2)*11.25
+                    PATH_CONFIG.rev = False
+                    PATH_CONFIG.count = 0
+                else:
+                    # turning car slowly from, -30' to -90' by checking the min front dist from 5m to 2m.
+                    driveParam.angle = (90 - direc) + (fd-2)*11.25
+                    PATH_CONFIG.rev = False
+                    PATH_CONFIG.count = 0
     else:
-        
-        d = short_see(direc+60, data)
-        print("short_ direc = ", d)
-        
-        if d is -1:
-            driveParam.velocity = 9830 #sudden stop and include rev flag
-            driveParam.angle = 15
-        else: 
-            driveParam.velocity = PATH_CONFIG.velocity
-            driveParam.angle = 3*(90-d)
-            #if d < 90:
-             #   driveParam.angle = 3*(90-d)
-            #elif d > 90:
-               # driveParam.angle = 3*(90-d)
+        vel_ang = check_2m_and_run(data)
+
+        driveParam.velocity = vel_ang[0]
+        driveParam.angle = vel_ang[1] 
 
     print("velocity = ", driveParam.velocity)
     print("angle = ", driveParam.angle)
     print("far direc = ", direc)
-     
+
 
     motorPub.publish(driveParam)
     return
