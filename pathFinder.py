@@ -9,6 +9,7 @@ from autobot.msg import pid_input
 from autobot.msg import wall_dist
 from autobot.msg import pathFinderState
 from autobot.srv import *
+from autobot.msg import gps_direc
 
 """
 TODO:
@@ -22,7 +23,7 @@ TODO:
 
 class PathConfig(object):
     __slots__ = ('wallToWatch', 'desiredTrajectory', 'velocity', 'pubRate',
-                 'minFrontDist', 'enabled', 'rev', 'count')
+                 'minFrontDist', 'enabled', 'rev', 'count', 'switch_to_gps')
     """
     wallToWatch: Set which wall to hug
     options: autobot.msg.wall_dist.WALL_LEFT
@@ -38,6 +39,7 @@ class PathConfig(object):
         self.enabled = True          # enable/disable state of wall hugging
         self.rev = False
         self.count = 0
+        self.switch_to_gps = False
 
 PATH_CONFIG = PathConfig()
 errorPub = rospy.Publisher('error', pid_input, queue_size=10)
@@ -230,6 +232,7 @@ def check_2m_and_run(data):
     else:
         PATH_CONFIG.rev = False
         PATH_CONFIG.count = 0
+        
     
     vel_ang = []
     vel_ang.append(velocity)
@@ -259,8 +262,8 @@ def callback(data):
     driveParam.velocity = PATH_CONFIG.velocity
     driveParam.angle = 0
 
-    if fd < 10:
-
+    if fd < 5:
+        PATH_CONFIG.switch_to_gps = False
         if fd < 2:
             vel_ang = check_2m_and_run(data)
 
@@ -292,27 +295,38 @@ def callback(data):
                     driveParam.angle = (90 - direc) + (fd-2)*11.25
                     PATH_CONFIG.rev = False
                     PATH_CONFIG.count = 0
+ 
+        motorPub.publish(driveParam)
     else:
-        vel_ang = check_2m_and_run(data)
-
-        driveParam.velocity = vel_ang[0]
-        driveParam.angle = vel_ang[1] 
+        frontDistance = [getRange(data, 70+i) for i in range(40)]			# creates the list of all the FRONT 	 values in range 70-to-110
+        if any(front_d < 2 for front_d in frontDistance):
+            vel_ang = check_2m_and_run(data)
+            PATH_CONFIG.switch_to_gps = False
+            driveParam.velocity = vel_ang[0]
+            driveParam.angle = vel_ang[1] 
+            motorPub.publish(driveParam)
+        else:
+            PATH_CONFIG.switch_to_gps = True
 
     print("velocity = ", driveParam.velocity)
     print("angle = ", driveParam.angle)
     print("far direc = ", direc)
-
-
-    motorPub.publish(driveParam)
+   
     return
 
+def gps_callback(gps_direc):
+    global PATH_CONFIG
+    if PATH_CONFIG.switch_to_gps:
+        driveParam.velocity = gps_direc.velocity
+        driveParam.angle = gps_direc.angle 
+        motorPub.publish(driveParam)
 
 if __name__ == '__main__':
     print("Path finding node started")
     rospy.Service('adjustWallDist', AdjustWallDist, HandleAdjustWallDist)
-    rospy.Service('togglePathFinder', TogglePathFinder,
-                  HandleTogglePathFinderService)
+    rospy.Service('togglePathFinder', TogglePathFinder, HandleTogglePathFinderService)
     rospy.init_node('pathFinder', anonymous=True)
     rospy.Subscriber("scan", LaserScan, callback)
+    rospy.Subscriber("GPS", gps_direc, gps_callback)
     rospy.Timer(rospy.Duration(0.5), callback=publishCurrentState)
     rospy.spin()
